@@ -70,14 +70,20 @@ class LinearRegressionModel:
         self.n_features = n_features
         self.n_targets = n_targets
 
-    def initialize_weights(self, random_state=42, scale=0.01):
-        """Initializes weights W (n_features x n_targets) with zeros."""
-        np.random.seed(random_state)
-
-        # Using np.random.randn for values from a standard normal distribution
-        # and scaling them down.
-        return np.random.randn(self.n_features, self.n_targets) * scale
-        #return np.zeros((self.n_features, self.n_targets), dtype=np.float64)
+    def initialize_weights(self, method='random', random_state=42, scale=0.01):
+        """
+        Initializes weights W (n_features x n_targets).
+        Supported methods:
+            - 'random': Random normal initialization scaled by `scale`.
+            - 'zeros': All weights set to zero.
+        """
+        if method == 'random':
+            np.random.seed(random_state)
+            return np.random.randn(self.n_features, self.n_targets) * scale
+        elif method == 'zeros':
+            return np.zeros((self.n_features, self.n_targets), dtype=np.float64)
+        else:
+            raise ValueError(f"Unknown weight initialization method: '{method}'")
 
     def objective_function(self, X, Y, W):
         """Computes E(W) = ||W^T X - Y||_F^2."""
@@ -332,6 +338,83 @@ class NewtonMethodOptimizer(Optimizer):
         return W, self.history
 
 
+class LBFGSOptimizer(Optimizer):
+    def __init__(self, model, max_iter=MAX_ITERATIONS, memory=10):
+        super().__init__(model, name="L-BFGS", max_iter=max_iter)
+        self.memory = memory  # History size (m in L-BFGS)
+
+    def optimize(self, X_train, Y_train, W_init):
+        W = W_init.copy()
+        s_list = []  # List of s = W_{k+1} - W_k
+        y_list = []  # List of y = grad_{k+1} - grad_k
+        rho_list = []
+
+        process = psutil.Process(os.getpid())
+        self.history = {
+            "objective_values": [], "iteration_times": [],
+            "memory_rss_bytes": [], "step_sizes": []
+        }
+
+        print(f"Starting {self.name} optimization...")
+
+        for i in tqdm(range(self.max_iter), desc=self.name):
+            iter_start_time = time.perf_counter()
+            mem_start = process.memory_info().rss
+
+            grad = self.model.gradient(X_train, Y_train, W)
+            q = grad.flatten()
+
+            # === Two-loop recursion ===
+            alpha_list = []
+            for s, y, rho in reversed(list(zip(s_list, y_list, rho_list))):
+                alpha = rho * np.dot(s, q)
+                alpha_list.append(alpha)
+                q = q - alpha * y
+
+            if y_list:
+                last_y = y_list[-1]
+                last_s = s_list[-1]
+                gamma = np.dot(last_s, last_y) / np.dot(last_y, last_y)
+            else:
+                gamma = 1.0
+            r = gamma * q
+
+            for s, y, rho, alpha in zip(s_list, y_list, rho_list, reversed(alpha_list)):
+                beta = rho * np.dot(y, r)
+                r = r + s * (alpha - beta)
+
+            direction = -r.reshape(W.shape)
+            alpha_step = self._backtracking_line_search(X_train, Y_train, W, grad, direction, alpha_init=1.0)
+            W_new = W + alpha_step * direction
+            grad_new = self.model.gradient(X_train, Y_train, W_new)
+
+            s = (W_new - W).flatten()
+            y = (grad_new - grad).flatten()
+
+            ys = np.dot(y, s)
+            if ys > 1e-10:  # Maintain curvature condition
+                rho = 1.0 / ys
+                s_list.append(s)
+                y_list.append(y)
+                rho_list.append(rho)
+                if len(s_list) > self.memory:
+                    s_list.pop(0)
+                    y_list.pop(0)
+                    rho_list.pop(0)
+
+            W = W_new
+
+            iter_end_time = time.perf_counter()
+            mem_end = process.memory_info().rss
+
+            self.history["objective_values"].append(self.model.objective_function(X_train, Y_train, W))
+            self.history["iteration_times"].append(iter_end_time - iter_start_time)
+            self.history["memory_rss_bytes"].append(mem_end)
+            self.history["step_sizes"].append(alpha_step)
+
+        print(f"{self.name} optimization finished.")
+        return W, self.history
+
 
 # --- 5. Benchmark Runner ---
 class BenchmarkRunner:
@@ -366,41 +449,43 @@ class BenchmarkRunner:
             "n_train_samples": X_train.shape[1] if X_train is not None else 0,
             "n_test_samples": X_test.shape[1] if X_test is not None else 0,
             "train_csv": train_csv_path,
-            "test_csv": test_csv_path
+            "test_csv": test_csv_path,
         }
 
+        # for each weight initialization method, run the optimizers
+        for weight_init_method in ['random', 'zeros']:
+            print(f"Initializing weights using method: {weight_init_method}")
+            W_initial = self.model.initialize_weights(method=weight_init_method, random_state=W_init_seed)
+            # for each optimizer
+            for optimizer in optimizers:
+                print(f"\n--- Running Optimizer: {optimizer.name}, W_0 as {weight_init_method} ---")
+                W_final, history = optimizer.optimize(X_train, Y_train, W_initial.copy())
+                
+                test_mse = self._calculate_mse(X_test, Y_test, W_final)
+                total_time = np.sum(history.get("iteration_times", [0]))
 
-        W_initial = self.model.initialize_weights(random_state=W_init_seed)
+                opt_result = {
+                    "optimizer_name": f"{optimizer.name}+{weight_init_method}",
+                    "W_final_norm": float(np.linalg.norm(W_final)) if W_final is not None else None,
+                    "test_mse": float(test_mse) if np.isfinite(test_mse) else None,
+                    "total_optimization_time_s": float(total_time),
+                    "num_iterations_run": len(history.get("objective_values", [])),
+                    "iterations_data": [
+                        {
+                            "iter": i + 1,
+                            "objective": float(history["objective_values"][i]) if i < len(history["objective_values"]) else None,
+                            "time_s": float(history["iteration_times"][i]) if i < len(history["iteration_times"]) else None,
+                            "memory_rss_bytes": int(history["memory_rss_bytes"][i]) if i < len(history["memory_rss_bytes"]) else None,
+                            "step_size": float(history["step_sizes"][i]) if i < len(history["step_sizes"]) else None
+                        } for i in range(len(history.get("objective_values", [])))
+                    ]
+                }
+                if hasattr(optimizer, 'batch_size'): # For SGD
+                    opt_result['batch_size'] = optimizer.batch_size
+                if hasattr(optimizer, 'regularization'): # For Newton/GN
+                    opt_result['regularization'] = optimizer.regularization
 
-        for optimizer in optimizers:
-            print(f"\n--- Running Optimizer: {optimizer.name} ---")
-            W_final, history = optimizer.optimize(X_train, Y_train, W_initial.copy())
-            
-            test_mse = self._calculate_mse(X_test, Y_test, W_final)
-            total_time = np.sum(history.get("iteration_times", [0]))
-
-            opt_result = {
-                "optimizer_name": optimizer.name,
-                "W_final_norm": float(np.linalg.norm(W_final)) if W_final is not None else None,
-                "test_mse": float(test_mse) if np.isfinite(test_mse) else None,
-                "total_optimization_time_s": float(total_time),
-                "num_iterations_run": len(history.get("objective_values", [])),
-                "iterations_data": [
-                    {
-                        "iter": i + 1,
-                        "objective": float(history["objective_values"][i]) if i < len(history["objective_values"]) else None,
-                        "time_s": float(history["iteration_times"][i]) if i < len(history["iteration_times"]) else None,
-                        "memory_rss_bytes": int(history["memory_rss_bytes"][i]) if i < len(history["memory_rss_bytes"]) else None,
-                        "step_size": float(history["step_sizes"][i]) if i < len(history["step_sizes"]) else None
-                    } for i in range(len(history.get("objective_values", [])))
-                ]
-            }
-            if hasattr(optimizer, 'batch_size'): # For SGD
-                opt_result['batch_size'] = optimizer.batch_size
-            if hasattr(optimizer, 'regularization'): # For Newton/GN
-                opt_result['regularization'] = optimizer.regularization
-
-            self.benchmark_results["optimizer_results"].append(opt_result)
+                self.benchmark_results["optimizer_results"].append(opt_result)
         
         return self.benchmark_results
 
@@ -452,6 +537,7 @@ if __name__ == "__main__":
         SteepestDescentOptimizer(model, max_iter=MAX_ITERATIONS),
         StochasticGradientDescentOptimizer(model, batch_size=128, max_iter=MAX_ITERATIONS), # TODO: batch size can be tuned
         NewtonMethodOptimizer(model, max_iter=MAX_ITERATIONS, regularization=1e-5),
+        LBFGSOptimizer(model, max_iter=MAX_ITERATIONS)
     ]
 
     # Run benchmark
