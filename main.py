@@ -70,11 +70,14 @@ class LinearRegressionModel:
         self.n_features = n_features
         self.n_targets = n_targets
 
-    def initialize_weights(self, random_state=None):
+    def initialize_weights(self, random_state=42, scale=0.01):
         """Initializes weights W (n_features x n_targets) with zeros."""
-        if random_state is not None:
-            np.random.seed(random_state)
-        return np.zeros((self.n_features, self.n_targets), dtype=np.float64)
+        np.random.seed(random_state)
+
+        # Using np.random.randn for values from a standard normal distribution
+        # and scaling them down.
+        return np.random.randn(self.n_features, self.n_targets) * scale
+        #return np.zeros((self.n_features, self.n_targets), dtype=np.float64)
 
     def objective_function(self, X, Y, W):
         """Computes E(W) = ||W^T X - Y||_F^2."""
@@ -117,7 +120,7 @@ class Optimizer:
         }
 
     def _backtracking_line_search(self, X, Y, W, grad_W, pk, 
-                                  c=0.1, beta=0.5, alpha_init=1.0,
+                                  c=0.1, tau=0.5, alpha_init=1.0e-2,
                                   X_batch=None, Y_batch=None): # For SGD
         """
         Performs backtracking line search.
@@ -142,7 +145,7 @@ class Optimizer:
             # Wolfe condition (Armijo condition)
             if new_objective <= current_objective + c * alpha * grad_pk_term:
                 return alpha
-            alpha *= beta
+            alpha *= tau
         return alpha # Return smallest alpha if condition not met (or 0 if too small)
 
     def optimize(self, X_train, Y_train, W_init):
@@ -182,8 +185,7 @@ class SteepestDescentOptimizer(Optimizer):
                 print(f"{self.name}: Gradient norm too small, stopping at iteration {i}.")
                 break
 
-            alpha = self._backtracking_line_search(X_train, Y_train, W, grad_W, pk, alpha_init=1.0)
-            
+            alpha = self._backtracking_line_search(X_train, Y_train, W, grad_W, pk, alpha_init=1e-2)
             W += alpha * pk
             
             iter_end_time = time.perf_counter()
@@ -270,10 +272,6 @@ class NewtonMethodOptimizer(Optimizer):
             "memory_rss_bytes": [], "step_sizes": []
         }
 
-        if X_train is None or Y_train is None:
-            print(f"{self.name}: Training data missing, skipping optimization.")
-            return W, self.history
-
         print(f"Starting {self.name} optimization...")
         
         # Precompute LU decomposition of (X X^T + lambda I)
@@ -333,11 +331,6 @@ class NewtonMethodOptimizer(Optimizer):
         print(f"{self.name} optimization finished.")
         return W, self.history
 
-class GaussNewtonMethodOptimizer(NewtonMethodOptimizer): 
-    def __init__(self, model, max_iter=MAX_ITERATIONS, regularization=1e-6):
-        # For linear least squares, Gauss-Newton is identical to Newton's method.
-        super().__init__(model, max_iter=max_iter, regularization=regularization)
-        self.name = "GaussNewtonMethod"
 
 
 # --- 5. Benchmark Runner ---
@@ -459,7 +452,6 @@ if __name__ == "__main__":
         SteepestDescentOptimizer(model, max_iter=MAX_ITERATIONS),
         StochasticGradientDescentOptimizer(model, batch_size=128, max_iter=MAX_ITERATIONS), # TODO: batch size can be tuned
         NewtonMethodOptimizer(model, max_iter=MAX_ITERATIONS, regularization=1e-5),
-        GaussNewtonMethodOptimizer(model, max_iter=MAX_ITERATIONS, regularization=1e-5)
     ]
 
     # Run benchmark
