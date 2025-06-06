@@ -490,9 +490,9 @@ class BenchmarkRunner:
         return self.benchmark_results
 
     def plot_results(self):
-
         plt.figure(figsize=(12, 8))
-        for result in self.benchmark_results["optimizer_results"]:
+        sorted_results = sorted(self.benchmark_results["optimizer_results"], key=lambda r: r['optimizer_name'])
+        for result in sorted_results:
             obj_values = [item['objective'] for item in result.get('iterations_data', []) if item.get('objective') is not None]
             if obj_values:
                 iters_to_plot = min(len(obj_values), result.get("num_iterations_run", MAX_ITERATIONS))
