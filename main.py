@@ -555,13 +555,20 @@ class BenchmarkRunner:
 
 
     def export_to_json(self, filepath="benchmark_results.json"):
+        """Appends the current benchmark results to a JSON file."""
         print(f"Exporting benchmark results to {filepath}...")
-        try:
-            with open(filepath, 'w') as f:
-                json.dump(self.benchmark_results, f, indent=4)
-            print("Export successful.")
-        except Exception as e:
-            print(f"Error exporting to JSON: {e}")
+        all_results = []
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                existing_data = json.load(f)
+            if isinstance(existing_data, list):
+                all_results = existing_data
+            else:
+                all_results = [existing_data]
+        
+        all_results.append(self.benchmark_results)
+        with open(filepath, 'w') as f:
+            json.dump(all_results, f, indent=4)
 
 def run_benchmark(dataset: Dataset):
     data_loader = DataLoader(dataset)
@@ -609,8 +616,12 @@ if __name__ == "__main__":
     )
     # --- End Configuration ---
 
-    for dataset in [student_performance_dataset]:
-        print(f"\nRunning benchmark for dataset: {dataset.name}")
+    datasets_to_run = [student_performance_dataset]
+
+    for dataset in datasets_to_run:
+        print(f"\n{'='*25} RUNNING BENCHMARK FOR: {dataset.name.upper()} {'='*25}")
         run_benchmark(dataset)
+
+    print(f"\n{'='*25} ALL BENCHMARKS FINISHED {'='*25}")
 
 
