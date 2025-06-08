@@ -535,6 +535,7 @@ class BenchmarkRunner:
     def plot_results(self):
         plt.figure(figsize=(12, 8))
         sorted_results = sorted(self.benchmark_results["optimizer_results"], key=lambda r: r['optimizer_name'])
+        dataset_name = self.benchmark_results["dataset_info"]["dataset_name"]
         for result in sorted_results:
             obj_values = [item['objective'] for item in result.get('iterations_data', []) if item.get('objective') is not None]
             if obj_values:
@@ -543,12 +544,12 @@ class BenchmarkRunner:
         
         plt.xlabel("Iteration")
         plt.ylabel("Objective Function Value (log scale)")
-        plt.title(f"Objective Function Progression for {sorted_results[0]['dataset_name']}")
+        plt.title(f"Objective Function Progression for {dataset_name}")
         plt.yscale('log') 
         plt.legend()
         plt.grid(True, which="both", ls="--")
         
-        plot_filename = "objective_progression.png"
+        plot_filename = f"objective_progression_{''.join(dataset_name.split())}.png"
         plt.savefig(plot_filename)
         print(f"Saved objective progression plot to {plot_filename}")
         plt.show()
@@ -616,7 +617,7 @@ if __name__ == "__main__":
     )
     # --- End Configuration ---
 
-    datasets_to_run = [student_performance_dataset]
+    datasets_to_run = [hand_tracking_dataset, student_performance_dataset]
 
     for dataset in datasets_to_run:
         print(f"\n{'='*25} RUNNING BENCHMARK FOR: {dataset.name.upper()} {'='*25}")
