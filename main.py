@@ -10,7 +10,10 @@ from tqdm import tqdm # For progress bars
 from scipy.linalg import lu_factor, lu_solve # For Newton's method
 
 
-MAX_ITERATIONS = 500
+# Set a time limit in seconds for the optimization process
+TIME_LIMIT_SECONDS = 60  # 1 minutes, per optimizer
+# A high iteration count to serve as a secondary stop condition
+MAX_ITERATIONS = 500 
 
 
 # -- Step to load student_habits_performance.csv and generate its Trn.csv and Tst.csv --
@@ -155,9 +158,10 @@ class LinearRegressionModel:
 # --- 3. Optimizer Base Class ---
 class Optimizer:
     """Base class for optimization algorithms."""
-    def __init__(self, model, name="Optimizer", max_iter=MAX_ITERATIONS):
+    def __init__(self, model, name="Optimizer", time_limit=TIME_LIMIT_SECONDS, max_iter=MAX_ITERATIONS):
         self.model = model
         self.name = name
+        self.time_limit = time_limit
         self.max_iter = max_iter
         self.history = {
             "objective_values": [],
@@ -204,8 +208,8 @@ class Optimizer:
 
 # --- 4. Specific Optimizer Implementations ---
 class SteepestDescentOptimizer(Optimizer):
-    def __init__(self, model, max_iter=MAX_ITERATIONS):
-        super().__init__(model, name="SteepestDescent", max_iter=max_iter)
+    def __init__(self, model, time_limit=TIME_LIMIT_SECONDS, max_iter=MAX_ITERATIONS):
+        super().__init__(model, name="SteepestDescent", time_limit=time_limit, max_iter=max_iter)
 
     def optimize(self, X_train, Y_train, W_init):
         W = W_init.copy()
@@ -219,36 +223,42 @@ class SteepestDescentOptimizer(Optimizer):
             print(f"{self.name}: Training data missing, skipping optimization.")
             return W, self.history
 
-        print(f"Starting {self.name} optimization...")
-        for i in tqdm(range(self.max_iter), desc=self.name):
+        print(f"Starting {self.name} optimization for {self.time_limit} seconds...")
+        start_time = time.perf_counter()
+        
+        pbar = tqdm(total=self.time_limit, desc=self.name)
+        i = 0
+        while (time.perf_counter() - start_time) < self.time_limit and i < self.max_iter:
             iter_start_time = time.perf_counter()
-            mem_start = process.memory_info().rss # Memory per iter can be noisy
 
             grad_W = self.model.gradient(X_train, Y_train, W)
             pk = -grad_W # Search direction
 
-            # Stop if gradient is too small
             if np.linalg.norm(grad_W) < 1e-8:
-                print(f"{self.name}: Gradient norm too small, stopping at iteration {i}.")
+                print(f"\n{self.name}: Gradient norm too small, stopping at iteration {i}.")
                 break
 
             alpha = self._backtracking_line_search(X_train, Y_train, W, grad_W, pk, alpha_init=1e-2)
             W += alpha * pk
             
             iter_end_time = time.perf_counter()
-            mem_end = process.memory_info().rss
-
+            
             self.history["objective_values"].append(self.model.objective_function(X_train, Y_train, W))
             self.history["iteration_times"].append(iter_end_time - iter_start_time)
-            self.history["memory_rss_bytes"].append(mem_end) # TODO: use mem_end - mem_start ?
+            self.history["memory_rss_bytes"].append(process.memory_info().rss)
             self.history["step_sizes"].append(alpha)
+
+            pbar.n = int(time.perf_counter() - start_time)
+            pbar.refresh()
+            i += 1
         
-        print(f"{self.name} optimization finished.")
+        pbar.close()
+        print(f"\n{self.name} optimization finished after {i} iterations.")
         return W, self.history
 
 class StochasticGradientDescentOptimizer(Optimizer):
-    def __init__(self, model, batch_size=128, max_iter=MAX_ITERATIONS):
-        super().__init__(model, name="StochasticGradientDescent", max_iter=max_iter)
+    def __init__(self, model, batch_size=128, time_limit=TIME_LIMIT_SECONDS, max_iter=MAX_ITERATIONS):
+        super().__init__(model, name="StochasticGradientDescent", time_limit=time_limit, max_iter=max_iter)
         self.batch_size = batch_size
 
     def optimize(self, X_train, Y_train, W_init):
@@ -263,53 +273,57 @@ class StochasticGradientDescentOptimizer(Optimizer):
             print(f"{self.name}: Training data missing, skipping optimization.")
             return W, self.history
             
-        n_total_samples = X_train.shape[1] # N_samples is the second dimension
+        n_total_samples = X_train.shape[1]
         if n_total_samples == 0:
             print(f"{self.name}: No training samples, skipping optimization.")
             return W, self.history
 
-        print(f"Starting {self.name} optimization...")
-        for i in tqdm(range(self.max_iter), desc=self.name):
-            iter_start_time = time.perf_counter()
-            mem_start = process.memory_info().rss
+        print(f"Starting {self.name} optimization for {self.time_limit} seconds...")
+        start_time = time.perf_counter()
 
-            # Mini-batch sampling: select columns (samples)
+        pbar = tqdm(total=self.time_limit, desc=self.name)
+        i = 0
+        while (time.perf_counter() - start_time) < self.time_limit and i < self.max_iter:
+            iter_start_time = time.perf_counter()
+
             indices = np.random.permutation(n_total_samples)[:self.batch_size]
             X_batch, Y_batch = X_train[:, indices], Y_train[:, indices]
 
             grad_W_batch = self.model.gradient(X_batch, Y_batch, W)
             pk = -grad_W_batch
 
-            # Stopping condition based on batch gradient can be tricky.
-            # Optional: Check full gradient norm periodically if batch gradient is small.
-            if np.linalg.norm(grad_W_batch) < 1e-7: # Looser tolerance for batch grad
+            if np.linalg.norm(grad_W_batch) < 1e-7:
                 full_grad_W = self.model.gradient(X_train, Y_train, W)
                 if np.linalg.norm(full_grad_W) < 1e-7:
-                    print(f"{self.name}: Full gradient norm too small, stopping at iteration {i}.")
+                    print(f"\n{self.name}: Full gradient norm too small, stopping at iteration {i}.")
                     break
 
             alpha = self._backtracking_line_search(X_train, Y_train, W, grad_W_batch, pk, 
-                                                  alpha_init=0.1, # Smaller initial alpha for SGD
+                                                  alpha_init=0.1,
                                                   X_batch=X_batch, Y_batch=Y_batch) 
             
             W += alpha * pk
             
             iter_end_time = time.perf_counter()
-            mem_end = process.memory_info().rss
             
             self.history["objective_values"].append(self.model.objective_function(X_train, Y_train, W))
             self.history["iteration_times"].append(iter_end_time - iter_start_time)
-            self.history["memory_rss_bytes"].append(mem_end)
+            self.history["memory_rss_bytes"].append(process.memory_info().rss)
             self.history["step_sizes"].append(alpha)
 
-        print(f"{self.name} optimization finished.")
+            pbar.n = int(time.perf_counter() - start_time)
+            pbar.refresh()
+            i += 1
+
+        pbar.close()
+        print(f"\n{self.name} optimization finished after {i} iterations.")
         return W, self.history
 
 class NewtonMethodOptimizer(Optimizer):
-    def __init__(self, model, max_iter=MAX_ITERATIONS, regularization=1e-6):
-        super().__init__(model, name="NewtonMethod", max_iter=max_iter)
+    def __init__(self, model, time_limit=TIME_LIMIT_SECONDS, max_iter=MAX_ITERATIONS, regularization=1e-6):
+        super().__init__(model, name="NewtonMethod", time_limit=time_limit, max_iter=max_iter)
         self.regularization = regularization 
-        self.lu_XXT_plus_reg = None # To cache LU decomposition of (X X^T + lambda I)
+        self.lu_XXT_plus_reg = None
 
     def optimize(self, X_train, Y_train, W_init):
         W = W_init.copy()
@@ -319,12 +333,10 @@ class NewtonMethodOptimizer(Optimizer):
             "memory_rss_bytes": [], "step_sizes": []
         }
 
-        print(f"Starting {self.name} optimization...")
+        print(f"Starting {self.name} optimization for {self.time_limit} seconds...")
         
-        # Precompute LU decomposition of (X X^T + lambda I)
-        # X X^T is (n_features x n_features)
         xxt_setup_start = time.perf_counter()
-        XXT = self.model.hessian_term_xx_t(X_train) # This is X @ X.T
+        XXT = self.model.hessian_term_xx_t(X_train)
         if XXT is None:
              print(f"{self.name}: XXT is None, cannot proceed.")
              return W, self.history
@@ -338,27 +350,26 @@ class NewtonMethodOptimizer(Optimizer):
             self.lu_XXT_plus_reg = None
             return W, self.history
 
-        for i in tqdm(range(self.max_iter), desc=self.name):
+        start_time = time.perf_counter()
+        pbar = tqdm(total=self.time_limit, desc=self.name)
+        i = 0
+        while (time.perf_counter() - start_time) < self.time_limit and i < self.max_iter:
             iter_start_time = time.perf_counter()
-            mem_start = process.memory_info().rss
 
             grad_W = self.model.gradient(X_train, Y_train, W)
             
             if np.linalg.norm(grad_W) < 1e-8:
-                print(f"{self.name}: Gradient norm too small, stopping at iteration {i}.")
+                print(f"\n{self.name}: Gradient norm too small, stopping at iteration {i}.")
                 break
             
             if self.lu_XXT_plus_reg is None:
-                 print(f"{self.name}: LU decomposition not available. Stopping.")
+                 print(f"\n{self.name}: LU decomposition not available. Stopping.")
                  break
 
-            # Search direction P_k solves (X X^T + lambda I) P_k = - (Gradient_W / 2)
-            # Gradient_W = 2 * X @ (W^T @ X - Y)^T
-            # So, - (Gradient_W / 2) = - X @ (W^T @ X - Y)^T
             pk_numerator = -X_train @ (W.T @ X_train - Y_train).T
 
             pk_cols = []
-            for col_idx in range(pk_numerator.shape[1]): # Iterate over m target dimensions
+            for col_idx in range(pk_numerator.shape[1]):
                 pk_col = lu_solve(self.lu_XXT_plus_reg, pk_numerator[:, col_idx], trans=0)
                 pk_cols.append(pk_col)
             pk = np.stack(pk_cols, axis=1)
@@ -368,27 +379,29 @@ class NewtonMethodOptimizer(Optimizer):
             W += alpha * pk
             
             iter_end_time = time.perf_counter()
-            mem_end = process.memory_info().rss
 
             self.history["objective_values"].append(self.model.objective_function(X_train, Y_train, W))
             self.history["iteration_times"].append(iter_end_time - iter_start_time)
-            self.history["memory_rss_bytes"].append(mem_end)
+            self.history["memory_rss_bytes"].append(process.memory_info().rss)
             self.history["step_sizes"].append(alpha)
+            
+            pbar.n = int(time.perf_counter() - start_time)
+            pbar.refresh()
+            i += 1
         
-        print(f"{self.name} optimization finished.")
+        pbar.close()
+        print(f"\n{self.name} optimization finished after {i} iterations.")
         return W, self.history
 
 
 class LBFGSOptimizer(Optimizer):
-    def __init__(self, model, max_iter=MAX_ITERATIONS, memory=10):
-        super().__init__(model, name="L-BFGS", max_iter=max_iter)
-        self.memory = memory  # History size (m in L-BFGS)
+    def __init__(self, model, time_limit=TIME_LIMIT_SECONDS, max_iter=MAX_ITERATIONS, memory=10):
+        super().__init__(model, name="L-BFGS", time_limit=time_limit, max_iter=max_iter)
+        self.memory = memory
 
     def optimize(self, X_train, Y_train, W_init):
         W = W_init.copy()
-        s_list = []  # List of s = W_{k+1} - W_k
-        y_list = []  # List of y = grad_{k+1} - grad_k
-        rho_list = []
+        s_list, y_list, rho_list = [], [], []
 
         process = psutil.Process(os.getpid())
         self.history = {
@@ -396,28 +409,27 @@ class LBFGSOptimizer(Optimizer):
             "memory_rss_bytes": [], "step_sizes": []
         }
 
-        print(f"Starting {self.name} optimization...")
-
-        for i in tqdm(range(self.max_iter), desc=self.name):
+        print(f"Starting {self.name} optimization for {self.time_limit} seconds...")
+        start_time = time.perf_counter()
+        
+        pbar = tqdm(total=self.time_limit, desc=self.name)
+        i = 0
+        while (time.perf_counter() - start_time) < self.time_limit and i < self.max_iter:
             iter_start_time = time.perf_counter()
-            mem_start = process.memory_info().rss
 
             grad = self.model.gradient(X_train, Y_train, W)
             q = grad.flatten()
 
-            # === Two-loop recursion ===
             alpha_list = []
             for s, y, rho in reversed(list(zip(s_list, y_list, rho_list))):
                 alpha = rho * np.dot(s, q)
                 alpha_list.append(alpha)
                 q = q - alpha * y
 
+            gamma = 1.0
             if y_list:
-                last_y = y_list[-1]
-                last_s = s_list[-1]
-                gamma = np.dot(last_s, last_y) / np.dot(last_y, last_y)
-            else:
-                gamma = 1.0
+                gamma = np.dot(y_list[-1], s_list[-1]) / np.dot(y_list[-1], y_list[-1])
+            
             r = gamma * q
 
             for s, y, rho, alpha in zip(s_list, y_list, rho_list, reversed(alpha_list)):
@@ -432,9 +444,8 @@ class LBFGSOptimizer(Optimizer):
             s = (W_new - W).flatten()
             y = (grad_new - grad).flatten()
 
-            ys = np.dot(y, s)
-            if ys > 1e-10:  # Maintain curvature condition
-                rho = 1.0 / ys
+            if np.dot(y, s) > 1e-10:
+                rho = 1.0 / np.dot(y, s)
                 s_list.append(s)
                 y_list.append(y)
                 rho_list.append(rho)
@@ -444,16 +455,19 @@ class LBFGSOptimizer(Optimizer):
                     rho_list.pop(0)
 
             W = W_new
-
             iter_end_time = time.perf_counter()
-            mem_end = process.memory_info().rss
 
             self.history["objective_values"].append(self.model.objective_function(X_train, Y_train, W))
             self.history["iteration_times"].append(iter_end_time - iter_start_time)
-            self.history["memory_rss_bytes"].append(mem_end)
+            self.history["memory_rss_bytes"].append(process.memory_info().rss)
             self.history["step_sizes"].append(alpha_step)
 
-        print(f"{self.name} optimization finished.")
+            pbar.n = int(time.perf_counter() - start_time)
+            pbar.refresh()
+            i += 1
+        
+        pbar.close()
+        print(f"\n{self.name} optimization finished after {i} iterations.")
         return W, self.history
 
 
@@ -539,13 +553,14 @@ class BenchmarkRunner:
         for result in sorted_results:
             obj_values = [item['objective'] for item in result.get('iterations_data', []) if item.get('objective') is not None]
             if obj_values:
-                iters_to_plot = min(len(obj_values), result.get("num_iterations_run", MAX_ITERATIONS))
-                plt.plot(range(1, iters_to_plot + 1), obj_values[:iters_to_plot], label=result["optimizer_name"], marker='.', linestyle='-')
+                # Plot objective vs. cumulative time
+                cumulative_time = np.cumsum([item['time_s'] for item in result.get('iterations_data', []) if item.get('time_s') is not None])
+                plt.plot(cumulative_time, obj_values[:len(cumulative_time)], label=result["optimizer_name"], marker='.', linestyle='-')
         
-        plt.xlabel("Iteration")
+        plt.xlabel("Time (s)")
         plt.ylabel("Objective Function Value (log scale)")
         plt.title(f"Objective Function Progression for {dataset_name}")
-        plt.yscale('log') 
+        plt.yscale('log')
         plt.legend()
         plt.grid(True, which="both", ls="--")
         
@@ -575,19 +590,16 @@ def run_benchmark(dataset: Dataset):
     data_loader = DataLoader(dataset)
     model = LinearRegressionModel(n_features=dataset.n_features, n_targets=dataset.n_targets)
 
-    # Initialize optimizers with the model
     optimizers_to_run = [
-        SteepestDescentOptimizer(model, max_iter=MAX_ITERATIONS),
-        StochasticGradientDescentOptimizer(model, batch_size=128, max_iter=MAX_ITERATIONS), # TODO: batch size can be tuned
-        NewtonMethodOptimizer(model, max_iter=MAX_ITERATIONS, regularization=1e-5),
-        LBFGSOptimizer(model, max_iter=MAX_ITERATIONS)
+        SteepestDescentOptimizer(model, time_limit=TIME_LIMIT_SECONDS),
+        StochasticGradientDescentOptimizer(model, batch_size=128, time_limit=TIME_LIMIT_SECONDS),
+        NewtonMethodOptimizer(model, time_limit=TIME_LIMIT_SECONDS, regularization=1e-5),
+        LBFGSOptimizer(model, time_limit=TIME_LIMIT_SECONDS)
     ]
 
-    # Run benchmark
     runner = BenchmarkRunner(data_loader, model)
     benchmark_data = runner.run(optimizers_to_run, W_init_seed=42)
 
-    # Plot and export results
     if benchmark_data and benchmark_data["optimizer_results"]:
         runner.plot_results()
         runner.export_to_json("benchmark_results.json")
@@ -598,8 +610,6 @@ def run_benchmark(dataset: Dataset):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # Instanciate the dataset with configuration parameters. 
-
     hand_tracking_dataset = Dataset(
         name="ICVL hand tracking dataset",
         train_csv="Trn.csv",
@@ -615,7 +625,6 @@ if __name__ == "__main__":
         n_features=7, # age,study_hours_per_day,social_media_hours,netflix_hours,attendance_percentage,sleep_hours,exercise_frequency
         n_targets=2 # mental_health_rating,exam_score
     )
-    # --- End Configuration ---
 
     datasets_to_run = [hand_tracking_dataset, student_performance_dataset]
 
@@ -624,5 +633,3 @@ if __name__ == "__main__":
         run_benchmark(dataset)
 
     print(f"\n{'='*25} ALL BENCHMARKS FINISHED {'='*25}")
-
-
