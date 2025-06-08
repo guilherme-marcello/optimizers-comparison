@@ -1,5 +1,15 @@
+DEFAULT_RANDOM_SEED = 42
+
 import numpy as np
+np.set_printoptions(precision=4, suppress=True)  # print options for numpy arrays
+np.random.seed(DEFAULT_RANDOM_SEED)  # seed for reproducibility
+
+import random
+random.seed(DEFAULT_RANDOM_SEED)  # seed for reproducibility
+
 import pandas as pd
+pd.set_option('display.float_format', '{:.4f}'.format)  # pandas float format
+
 from sklearn.model_selection import train_test_split
 import time
 import json
@@ -10,6 +20,7 @@ from tqdm import tqdm # For progress bars
 from scipy.linalg import lu_factor, lu_solve # For Newton's method
 
 
+# -- Constants for the optimization process --
 # Set a time limit in seconds for the optimization process
 TIME_LIMIT_SECONDS = 60  # 1 minutes, per optimizer
 # A high iteration count to serve as a secondary stop condition
@@ -493,6 +504,36 @@ class BenchmarkRunner:
         # MSE per target (mean across samples for each target dimension)
         mse_per_target = np.mean(errors**2, axis=1) # (m,)
         return np.mean(mse_per_target) # Average MSE across all targets
+    
+    def run_analytical_solution(self, X_train, Y_train, X_test, Y_test, regularization=1e-6):
+        """Computes the analytical solution, W = (XX^T + lambda*I)^-1 * XY^T."""
+        try:
+            start_time = time.perf_counter()
+            XXT = X_train @ X_train.T
+            XYT = X_train @ Y_train.T
+            
+            # add regularization for numerical stability
+            identity = np.eye(XXT.shape[0]) * regularization
+            W_analytical = np.linalg.solve(XXT + identity, XYT)
+            
+            computation_time = time.perf_counter() - start_time
+            test_mse = self._calculate_mse(X_test, Y_test, W_analytical)
+            
+            print(f"Analytical solution computed in {computation_time:.4f}s")
+            print(f"Analytical Test MSE: {test_mse}")
+
+            analytical_result = {
+                "dataset_name": self.benchmark_results["dataset_info"]["dataset_name"],
+                "optimizer_name": "Analytical",
+                "W_final_norm": float(np.linalg.norm(W_analytical)),
+                "test_mse": float(test_mse) if np.isfinite(test_mse) else None,
+                "total_optimization_time_s": float(computation_time),
+                "num_iterations_run": 1, # represents a single, direct computation
+            }
+            self.benchmark_results["optimizer_results"].append(analytical_result)
+
+        except np.linalg.LinAlgError as e:
+            print(f"Error computing analytical solution: {e}. The matrix may be singular.")
 
     def run(self, optimizers, W_init_seed=42):
         X_train, Y_train = self.data_loader.load_train_data()
@@ -507,6 +548,9 @@ class BenchmarkRunner:
             "train_csv": dataset.train_csv,
             "test_csv": dataset.test_csv
         }
+
+        # run analytical solution first as a baseline
+        self.run_analytical_solution(X_train, Y_train, X_test, Y_test)
 
         # for each weight initialization method, run the optimizers
         for weight_init_method in ['random', 'zeros']:
