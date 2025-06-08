@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 import time
 import json
 import os
@@ -8,21 +9,61 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm # For progress bars
 from scipy.linalg import lu_factor, lu_solve # For Newton's method
 
-# --- Configuration ---
-N_FEATURES = 2048
-N_TARGETS = 63
-MAX_ITERATIONS = 2
 
-# --- 1. Data Loader ---
-class DataLoader:
+MAX_ITERATIONS = 500
+
+
+# -- Step to load student_habits_performance.csv and generate its Trn.csv and Tst.csv --
+def split_student_habits_data(input_csv, train_csv='Trn_student.csv', test_csv='Tst_student.csv', test_size=0.2, random_state=42):
     """
-    Handles loading data from CSV files.
+    Splits the student habits dataset into training and testing sets.
+    Saves the training set to 'Trn_student.csv' and the testing set to 'Tst_student.csv'.
+    """
+    df = pd.read_csv(input_csv)
+    df.info()
+    numeric_df = df.select_dtypes(include=['number'])
+    print("\nSelected Numeric Features:")
+    print(list(numeric_df.columns))
+
+    print(f"\nSplitting data into training and testing sets ({int((1-test_size)*100)}%/{int(test_size*100)}%)...")
+    train_df, test_df = train_test_split(
+        numeric_df,
+        test_size=test_size,
+        random_state=random_state
+    )
+    print(f"Training set shape: {train_df.shape}")
+    print(f"Testing set shape: {test_df.shape}")
+
+    train_df.to_csv(train_csv, index=False, header=False)
+    test_df.to_csv(test_csv, index=False, header=False)
+
+split_student_habits_data('student_habits_performance.csv')
+
+
+
+class Dataset:
+    """
+    Represents a dataset with features and targets.
     Assumes CSV format: N_rows x (n_features + n_targets) columns.
     Each row: [feature_1, ..., feature_n, target_1, ..., target_m]
     """
-    def __init__(self, n_features=N_FEATURES, n_targets=N_TARGETS):
+    def __init__(self, name, train_csv, test_csv, n_features, n_targets):
+        self.name = name
+        self.train_csv = train_csv
+        self.test_csv = test_csv
         self.n_features = n_features
         self.n_targets = n_targets
+
+# --- 1. Data Loader ---
+class DataLoader:
+    def __init__(self, dataset: Dataset):
+        self.dataset = dataset
+
+    def load_train_data(self):
+        return self.load_data(self.dataset.train_csv)
+    
+    def load_test_data(self):
+        return self.load_data(self.dataset.test_csv)
 
     def load_data(self, csv_filepath):
         """
@@ -41,14 +82,14 @@ class DataLoader:
             data = df.values.astype(np.float64)
             
             # Transpose to get (n_features, N_samples) and (n_targets, N_samples)
-            X = data[:, :self.n_features].T 
-            Y = data[:, self.n_features:self.n_features + self.n_targets].T
+            X = data[:, :self.dataset.n_features].T 
+            Y = data[:, self.dataset.n_features:self.dataset.n_features + self.dataset.n_targets].T
             
             print(f"Loaded X shape: {X.shape}, Y shape: {Y.shape}")
-            if X.shape[0] != self.n_features:
-                raise ValueError(f"Expected {self.n_features} features (X.shape[0]), got {X.shape[0]}")
-            if Y.shape[0] != self.n_targets:
-                raise ValueError(f"Expected {self.n_targets} targets (Y.shape[0]), got {Y.shape[0]}")
+            if X.shape[0] != self.dataset.n_features:
+                raise ValueError(f"Expected {self.dataset.n_features} features (X.shape[0]), got {X.shape[0]}")
+            if Y.shape[0] != self.dataset.n_targets:
+                raise ValueError(f"Expected {self.dataset.n_targets} targets (Y.shape[0]), got {Y.shape[0]}")
             if X.shape[1] != Y.shape[1] and X.shape[1] != 0: # Number of samples must match
                  raise ValueError(f"Number of samples in X ({X.shape[1]}) and Y ({Y.shape[1]}) must match.")
 
@@ -66,7 +107,7 @@ class LinearRegressionModel:
     Y is (n_targets, N_samples)
     Objective: E(W) = ||W^T X - Y||_F^2
     """
-    def __init__(self, n_features=N_FEATURES, n_targets=N_TARGETS):
+    def __init__(self, n_features, n_targets):
         self.n_features = n_features
         self.n_targets = n_targets
 
@@ -148,7 +189,7 @@ class Optimizer:
             W_new = W + alpha * pk
             new_objective = self.model.objective_function(eval_X, eval_Y, W_new)
             
-            # Wolfe condition (Armijo condition)
+            # Wolfe condition
             if new_objective <= current_objective + c * alpha * grad_pk_term:
                 return alpha
             alpha *= tau
@@ -439,17 +480,18 @@ class BenchmarkRunner:
         mse_per_target = np.mean(errors**2, axis=1) # (m,)
         return np.mean(mse_per_target) # Average MSE across all targets
 
-    def run(self, optimizers, train_csv_path, test_csv_path, W_init_seed=42):
-        X_train, Y_train = self.data_loader.load_data(train_csv_path)
-        X_test, Y_test = self.data_loader.load_data(test_csv_path)
+    def run(self, optimizers, W_init_seed=42):
+        X_train, Y_train = self.data_loader.load_train_data()
+        X_test, Y_test = self.data_loader.load_test_data()
 
         self.benchmark_results["dataset_info"] = {
+            "dataset_name": dataset.name,
             "n_features": self.model.n_features,
             "n_targets": self.model.n_targets,
             "n_train_samples": X_train.shape[1] if X_train is not None else 0,
             "n_test_samples": X_test.shape[1] if X_test is not None else 0,
-            "train_csv": train_csv_path,
-            "test_csv": test_csv_path,
+            "train_csv": dataset.train_csv,
+            "test_csv": dataset.test_csv
         }
 
         # for each weight initialization method, run the optimizers
@@ -465,6 +507,7 @@ class BenchmarkRunner:
                 total_time = np.sum(history.get("iteration_times", [0]))
 
                 opt_result = {
+                    "dataset_name": self.benchmark_results["dataset_info"]["dataset_name"],
                     "optimizer_name": f"{optimizer.name}+{weight_init_method}",
                     "W_final_norm": float(np.linalg.norm(W_final)) if W_final is not None else None,
                     "test_mse": float(test_mse) if np.isfinite(test_mse) else None,
@@ -500,7 +543,7 @@ class BenchmarkRunner:
         
         plt.xlabel("Iteration")
         plt.ylabel("Objective Function Value (log scale)")
-        plt.title("Objective Function Progression")
+        plt.title(f"Objective Function Progression for {sorted_results[0]['dataset_name']}")
         plt.yscale('log') 
         plt.legend()
         plt.grid(True, which="both", ls="--")
@@ -520,17 +563,9 @@ class BenchmarkRunner:
         except Exception as e:
             print(f"Error exporting to JSON: {e}")
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    # Ensure these files are in the same directory as the script or provide full paths.
-    train_file = "Trn.csv"
-    test_file = "Tst.csv"
-    current_n_features = N_FEATURES
-    current_n_targets = N_TARGETS
-    # --- End Configuration ---
-
-    data_loader = DataLoader(n_features=current_n_features, n_targets=current_n_targets)
-    model = LinearRegressionModel(n_features=current_n_features, n_targets=current_n_targets)
+def run_benchmark(dataset: Dataset):
+    data_loader = DataLoader(dataset)
+    model = LinearRegressionModel(n_features=dataset.n_features, n_targets=dataset.n_targets)
 
     # Initialize optimizers with the model
     optimizers_to_run = [
@@ -542,7 +577,7 @@ if __name__ == "__main__":
 
     # Run benchmark
     runner = BenchmarkRunner(data_loader, model)
-    benchmark_data = runner.run(optimizers_to_run, train_file, test_file, W_init_seed=42)
+    benchmark_data = runner.run(optimizers_to_run, W_init_seed=42)
 
     # Plot and export results
     if benchmark_data and benchmark_data["optimizer_results"]:
@@ -552,3 +587,30 @@ if __name__ == "__main__":
         print("Benchmarking did not produce results. Skipping plot and export.")
 
     print("\nBenchmark finished. Check 'benchmark_results.json' and 'objective_progression.png'.")
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    # Instanciate the dataset with configuration parameters. 
+
+    hand_tracking_dataset = Dataset(
+        name="ICVL hand tracking dataset",
+        train_csv="Trn.csv",
+        test_csv="Tst.csv",
+        n_features=2048,
+        n_targets=63
+    )
+
+    student_performance_dataset = Dataset(
+        name="Student Habits and Performance",
+        train_csv="Trn_student.csv",
+        test_csv="Tst_student.csv",
+        n_features=7, # age,study_hours_per_day,social_media_hours,netflix_hours,attendance_percentage,sleep_hours,exercise_frequency
+        n_targets=2 # mental_health_rating,exam_score
+    )
+    # --- End Configuration ---
+
+    for dataset in [student_performance_dataset]:
+        print(f"\nRunning benchmark for dataset: {dataset.name}")
+        run_benchmark(dataset)
+
+
